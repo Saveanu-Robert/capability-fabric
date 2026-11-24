@@ -1,0 +1,12 @@
+**/target
+**/.jqwik-database
+.idea
+.vscode
+.git
+.github
+.env
+*.iml
+*.md
+secrets
+.demo
+demo.sh

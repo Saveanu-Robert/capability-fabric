@@ -1,0 +1,4 @@
+# Unix line endings for every text file, so a checkout builds the same everywhere.
+* text=auto eol=lf
+*.jar binary
+*.png binary

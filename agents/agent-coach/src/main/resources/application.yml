@@ -1,0 +1,33 @@
+spring:
+  application:
+    name: agent-coach
+  main:
+    banner-mode: off
+    web-application-type: none
+  threads:
+    virtual:
+      enabled: true
+  ai:
+    retry:
+      # The fabric's own repair loop and step retries handle failures; fail fast here.
+      max-attempts: 1
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+
+fabric:
+  nats:
+    url: ${NATS_URL:nats://localhost:4222}
+  agent:
+    provider: agent-coach
+  coach:
+    # How often the coach looks at every open goal (due today, overdue, stale), besides reacting to facts.
+    sweep: ${FABRIC_COACH_SWEEP:PT10M}
+    stale-days: ${FABRIC_COACH_STALE_DAYS:7}
+  model:
+    mode: ${FABRIC_MODEL_MODE:live}
+    chat: ${FABRIC_CHAT_MODEL:qwen3.5:4b}
+
+logging:
+  level:
+    root: warn
+    dev.capabilityfabric: info

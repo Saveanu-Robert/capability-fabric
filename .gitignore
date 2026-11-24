@@ -1,0 +1,25 @@
+# Build output
+target/
+
+# Property-based test database written by jqwik
+.jqwik-database
+
+# IDEs
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+
+# Operating systems
+.DS_Store
+
+# Local configuration and logs
+.env
+*.log
+
+# Keys, certificates and broker credentials made by the setup service; never commit them.
+secrets/
+
+# The demo script's own secrets (demo.sh); it removes the folder when it finishes.
+.demo/

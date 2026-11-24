@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+      # Unit tests only: no Docker, no model. Integration tests run locally with ./mvnw -Pit verify.
+      - name: Build and test
+        run: ./mvnw -B verify
+
+  compose:
+    name: compose file is valid
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate every profile
+        run: docker compose --profile extras --profile tools --profile ollama config -q

@@ -1,0 +1,336 @@
+# Capability Fabric: broker, database, kernel, gateway and capability agents.
+# You talk to it in plain language through the cli service (or the cli jar on the host).
+#
+#   docker compose up -d --build                    core: kernel, gateway, assistant, forge, coach, planner, decomposer, graph
+#   docker compose up -d agent-estimator            a new capability joins the running system
+#   docker compose up -d agent-sentinel agent-calendar
+#   docker compose run --rm cli "Plan my website launch by December 15"
+#
+# Model server: by default the services use Ollama running on your machine (best on macOS, it uses the GPU).
+# Without a local Ollama, start the bundled one:  docker compose --profile ollama up -d
+# and set OLLAMA_BASE_URL=http://ollama:11434 in .env (see .env.example).
+#
+# Secrets: the setup service writes ./secrets once, one folder per role. Each service mounts only the folders it
+# needs: public/ (the certificate authority's certificate), plus kernel/, agent/, person/, gateway/, db/ or nats/.
+# The ca/ folder (the authority's private key) is mounted into setup alone. FABRIC_SECRETS_DIR and FABRIC_IMAGE move the
+# secrets folder and rename the image, so a second stack (the demo scripts run one, see README.md) shares neither.
+
+# The project name: containers, networks and volumes are named after it (capability-fabric-kernel-1,
+# capability-fabric_pg-data) whatever the folder is called; docker compose -p <name> gives a second stack its own.
+name: capability-fabric
+
+x-app: &app
+  build: .
+  image: ${FABRIC_IMAGE:-capability-fabric:dev}
+  restart: unless-stopped
+  mem_limit: 384m
+  depends_on:
+    nats:
+      condition: service_started
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  environment: &app-env
+    # TLS to the broker, and the agent role's NKey (the broker limits what this role may publish and read).
+    NATS_URL: tls://nats:4222
+    FABRIC_NATS_CAFILE: /security/public/ca.crt
+    FABRIC_NATS_SEEDFILE: /security/agent/agent.nk
+    # Signed messages, admission and grants; set FABRIC_SECURITY=false only for experiments on a closed machine.
+    FABRIC_SECURITY_ENABLED: ${FABRIC_SECURITY:-true}
+    # Each agent's own identity (Ed25519 signing key, X25519 sealing key) lives in its own volume, mounted at /keys.
+    FABRIC_SECURITY_KEYSDIR: /keys
+    # The kernel's public key, written by setup: agents trust exactly this key for facts, replies and calls.
+    FABRIC_SECURITY_KERNELKEYFILE: /security/public/kernel.pub
+    # The person's time zone: "today", "tomorrow" and due dates are computed in it (for example Europe/Berlin).
+    TZ: ${TZ:-UTC}
+    OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    FABRIC_CHAT_MODEL: ${FABRIC_CHAT_MODEL:-qwen3.5:4b}
+    FABRIC_EMBEDDING_MODEL: ${FABRIC_EMBEDDING_MODEL:-qwen3-embedding:0.6b}
+    # live: call the model; replay: answer only from recorded decisions (reproduce a run without a model)
+    FABRIC_MODEL_MODE: ${FABRIC_MODEL_MODE:-live}
+
+services:
+  # Writes ./secrets on the first start and keeps it afterwards. Each `docker compose up` runs it again: it renews
+  # certificates close to expiry and adds new FABRIC_PUBLIC_HOSTS, and gives files in the CLI's and the agents' volumes
+  # to the service user. When its image or settings change, compose restarts the broker and the gateway so they load the
+  # new files; after a renewal alone, run docker compose restart nats gateway (setup's log says so).
+  setup:
+    build: .
+    image: ${FABRIC_IMAGE:-capability-fabric:dev}
+    user: "0:0"
+    restart: "no"
+    entrypoint: ["java", "--enable-native-access=ALL-UNNAMED", "-jar", "/app/fabric-setup.jar", "/security"]
+    environment:
+      # Extra names the gateway's certificate should carry, e.g. fabric.example.org (for a demo server).
+      FABRIC_PUBLIC_HOSTS: ${FABRIC_PUBLIC_HOSTS:-}
+      # The folder the service volumes below are mounted under; setup touches volumes only when this is set.
+      FABRIC_SERVICE_VOLUMES: /fabric-volumes
+    volumes:
+      - ${FABRIC_SECRETS_DIR:-./secrets}:/security:z
+      # Mounted only so setup can see who owns the project files: it gives a secrets folder that the container runtime
+      # created as root to that user.
+      - ./compose.yaml:/project/compose.yaml:ro,z
+      # The CLI's home and the agents' key volumes: setup gives files that another user owns to the service user
+      # (10001), so the services can always read their own keys.
+      - cli-home:/fabric-volumes/cli-home
+      - keys-assistant:/fabric-volumes/keys-assistant
+      - keys-forge:/fabric-volumes/keys-forge
+      - keys-coach:/fabric-volumes/keys-coach
+      - keys-planner:/fabric-volumes/keys-planner
+      - keys-decomposer:/fabric-volumes/keys-decomposer
+      - keys-graph:/fabric-volumes/keys-graph
+      - keys-estimator:/fabric-volumes/keys-estimator
+      - keys-sentinel:/fabric-volumes/keys-sentinel
+      - keys-calendar:/fabric-volumes/keys-calendar
+
+  nats:
+    image: nats:2.15.3
+    restart: unless-stopped
+    command: ["-c", "/security/nats/nats.conf"]
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+        restart: true
+    ports:
+      # Reachable from this machine only; remote devices use the gateway.
+      - "127.0.0.1:${NATS_PORT:-4222}:4222"
+    volumes:
+      - ${FABRIC_SECRETS_DIR:-./secrets}/nats:/security/nats:ro,z
+      - nats-data:/data
+
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg18
+    restart: unless-stopped
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_DB: fabric
+      POSTGRES_USER: fabric
+      POSTGRES_PASSWORD_FILE: /security/db/fabric.db.password
+    # The image reads the password file only when it creates the database; this also sets it on every start, so a
+    # database created with an older password follows the file.
+    # A stop asks postgres for a fast shutdown (its own stop signal) and waits until it has finished; if postgres
+    # exits while starting, the container exits with it so the restart policy applies.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        docker-entrypoint.sh postgres &
+        pid=$$!
+        trap 'kill -INT $$pid 2>/dev/null' TERM INT
+        # Over TCP: the temporary server that runs the first-start scripts listens on the socket only.
+        until pg_isready -q -h 127.0.0.1 -U fabric -d fabric; do
+          kill -0 $$pid 2>/dev/null || { wait $$pid; exit $$?; }
+          sleep 1
+        done
+        printf "ALTER ROLE fabric PASSWORD '%s'" "$$(cat /security/db/fabric.db.password)" \
+          | psql -q -v ON_ERROR_STOP=1 -U fabric -d fabric >/dev/null 2>&1 \
+          || echo "could not set the database password from the password file" >&2
+        status=0
+        while kill -0 $$pid 2>/dev/null; do wait $$pid; status=$$?; done
+        exit $$status
+    # Only the kernel shares this network; no other container can reach the database.
+    networks: [data]
+    volumes:
+      - ${FABRIC_SECRETS_DIR:-./secrets}/db:/security/db:ro,z
+      - pg-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U fabric -d fabric"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  kernel:
+    <<: *app
+    command: ["/app/kernel.jar"]
+    depends_on:
+      nats:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      DATABASE_URL: jdbc:postgresql://postgres:5432/fabric
+      FABRIC_NATS_SEEDFILE: /security/kernel/kernel.nk
+      FABRIC_SECURITY_KEYFILE: /security/kernel/kernel.key
+      # Public holidays (ISO dates, comma-separated); every calendar-aware capability skips them.
+      FABRIC_KERNEL_HOLIDAYS: ${FABRIC_HOLIDAYS:-}
+      # The address remote devices use for the gateway; invitations and pairing instructions show it.
+      FABRIC_KERNEL_GATEWAYURL: ${FABRIC_GATEWAY_URL:-https://localhost:${GATEWAY_PORT:-8443}}
+      # Comma-separated capability ids that always need human approval.
+      FABRIC_KERNEL_APPROVALREQUIRED: ${FABRIC_APPROVAL_REQUIRED:-}
+      # Comma-separated capability ids that may never run.
+      FABRIC_KERNEL_DENIED: ${FABRIC_DENIED:-}
+      # Changes within a minute from one device that count as unusual (asked again, or refused with --decide).
+      FABRIC_SECURITY_BURST: ${FABRIC_SECURITY_BURST:-6}
+    networks: [default, data]
+    volumes:
+      - ${FABRIC_SECRETS_DIR:-./secrets}/public:/security/public:ro,z
+      - ${FABRIC_SECRETS_DIR:-./secrets}/kernel:/security/kernel:ro,z
+      - ${FABRIC_SECRETS_DIR:-./secrets}/db:/security/db:ro,z
+    mem_limit: 768m
+
+  agent-assistant:
+    <<: *app
+    command: ["/app/agent-assistant.jar"]
+    volumes:
+      - ${FABRIC_SECRETS_DIR:-./secrets}/public:/security/public:ro,z
+      - ${FABRIC_SECRETS_DIR:-./secrets}/agent:/security/agent:ro,z
+      - keys-assistant:/keys
+
+  # Designs new capabilities on request and hosts the ones the system grew.
+  agent-forge:
+    <<: *app
+    command: ["/app/agent-forge.jar"]
+    volumes:
+      - ${FABRIC_SECRETS_DIR:-./secrets}/public:/security/public:ro,z
+      - ${FABRIC_SECRETS_DIR:-./secrets}/agent:/security/agent:ro,z
+      - keys-forge:/keys
+
+  # Speaks first: leaves messages with suggestions in the person's inbox.
+  agent-coach:
+    <<: *app
+    command: ["/app/agent-coach.jar"]
+    environment:
+      <<: *app-env
+      FABRIC_COACH_SWEEP: ${FABRIC_COACH_SWEEP:-PT10M}
+    volumes:
+      - ${FABRIC_SECRETS_DIR:-./secrets}/public:/security/public:ro,z
+      - ${FABRIC_SECRETS_DIR:-./secrets}/agent:/security/agent:ro,z
+      - keys-coach:/keys
+
+  agent-planner:
+    <<: *app
+    command: ["/app/agent-planner.jar"]
+    volumes:
+      - ${FABRIC_SECRETS_DIR:-./secrets}/public:/security/public:ro,z
+      - ${FABRIC_SECRETS_DIR:-./secrets}/agent:/security/agent:ro,z
+      - keys-planner:/keys
+
+  agent-decomposer:
+    <<: *app
+    command: ["/app/agent-decomposer.jar"]
+    volumes:
+      - ${FABRIC_SECRETS_DIR:-./secrets}/public:/security/public:ro,z
+      - ${FABRIC_SECRETS_DIR:-./secrets}/agent:/security/agent:ro,z
+      - keys-decomposer:/keys
+
+  agent-graph:
+    <<: *app
+    command: ["/app/agent-graph.jar"]
+    volumes:
+      - ${FABRIC_SECRETS_DIR:-./secrets}/public:/security/public:ro,z
+      - ${FABRIC_SECRETS_DIR:-./secrets}/agent:/security/agent:ro,z
+      - keys-graph:/keys
+
+  # Capabilities that join later. Start them while the system runs:
+  #   docker compose up -d agent-estimator
+  agent-estimator:
+    <<: *app
+    command: ["/app/agent-estimator.jar"]
+    profiles: ["extras"]
+    volumes:
+      - ${FABRIC_SECRETS_DIR:-./secrets}/public:/security/public:ro,z
+      - ${FABRIC_SECRETS_DIR:-./secrets}/agent:/security/agent:ro,z
+      - keys-estimator:/keys
+
+  agent-sentinel:
+    <<: *app
+    command: ["/app/agent-sentinel.jar"]
+    profiles: ["extras"]
+    environment:
+      <<: *app-env
+      # How often deadline risk is re-checked for every open goal (dates move on even when nothing changes).
+      FABRIC_SENTINEL_SWEEP: ${FABRIC_SENTINEL_SWEEP:-PT1H}
+    volumes:
+      - ${FABRIC_SECRETS_DIR:-./secrets}/public:/security/public:ro,z
+      - ${FABRIC_SECRETS_DIR:-./secrets}/agent:/security/agent:ro,z
+      - keys-sentinel:/keys
+
+  agent-calendar:
+    <<: *app
+    command: ["/app/agent-calendar.jar"]
+    profiles: ["extras"]
+    volumes:
+      - ${FABRIC_SECRETS_DIR:-./secrets}/public:/security/public:ro,z
+      - ${FABRIC_SECRETS_DIR:-./secrets}/agent:/security/agent:ro,z
+      - keys-calendar:/keys
+
+  # The one internet-facing door: POST https://<host>:8443/intent carries only signed requests of people's devices
+  # (sentences, answers, inbox and goal reads, the emergency stop and resume, pairing and joining, and the request for
+  # the kernel's keys that comes before them).
+  gateway:
+    <<: *app
+    command: ["/app/fabric-gateway.jar"]
+    depends_on:
+      nats:
+        condition: service_started
+      setup:
+        condition: service_completed_successfully
+        restart: true
+    ports:
+      - "${GATEWAY_PORT:-8443}:8443"
+    environment:
+      <<: *app-env
+      # The gateway's own broker login: it may only forward the subjects of its allowlist and read its own replies.
+      FABRIC_NATS_SEEDFILE: /security/gateway/gateway.nk
+      GATEWAY_KEYSTORE: /security/gateway/gateway.p12
+    volumes:
+      - ${FABRIC_SECRETS_DIR:-./secrets}/public:/security/public:ro,z
+      - ${FABRIC_SECRETS_DIR:-./secrets}/gateway:/security/gateway:ro,z
+
+  cli:
+    <<: *app
+    restart: "no"
+    entrypoint: ["java", "--enable-native-access=ALL-UNNAMED", "-jar", "/app/fabric-cli.jar"]
+    environment:
+      <<: *app-env
+      # The CLI reads its broker login (person/person.nk) and the certificate authority (public/ca.crt) here.
+      FABRIC_SECRETS: /security
+      # The CLI container's device key and pairing are kept between runs.
+      FABRIC_HOME: /fabric-home
+    volumes:
+      - ${FABRIC_SECRETS_DIR:-./secrets}/public:/security/public:ro,z
+      - ${FABRIC_SECRETS_DIR:-./secrets}/person:/security/person:ro,z
+      - cli-home:/fabric-home
+    profiles: ["tools"]
+
+  # Bundled model server for machines without a local Ollama (CPU; NVIDIA GPUs via compose.gpu.yaml).
+  ollama:
+    image: ollama/ollama:0.40.16
+    restart: unless-stopped
+    profiles: ["ollama"]
+    volumes:
+      - ollama-data:/root/.ollama
+
+  ollama-pull:
+    image: ollama/ollama:0.40.16
+    profiles: ["ollama"]
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "until ollama list >/dev/null 2>&1; do sleep 1; done; ollama pull ${FABRIC_CHAT_MODEL:-qwen3.5:4b} && ollama pull ${FABRIC_EMBEDDING_MODEL:-qwen3-embedding:0.6b}"
+    restart: "no"
+
+networks:
+  default:
+  data:
+    internal: true
+
+volumes:
+  nats-data:
+  pg-data:
+  ollama-data:
+  cli-home:
+  keys-assistant:
+  keys-forge:
+  keys-coach:
+  keys-planner:
+  keys-decomposer:
+  keys-graph:
+  keys-estimator:
+  keys-sentinel:
+  keys-calendar:

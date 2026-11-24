@@ -1,0 +1,46 @@
+spring:
+  application:
+    name: kernel
+  config:
+    # The database password setup generated (file fabric.db.password), when the folder is mounted.
+    import: optional:configtree:${FABRIC_DB_SECRETS:/security/db/}
+  main:
+    banner-mode: off
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/fabric}
+    username: ${DATABASE_USER:fabric}
+    password: ${DATABASE_PASSWORD:${fabric.db.password:fabric}}
+  sql:
+    init:
+      mode: always
+  ai:
+    retry:
+      # The fabric's own repair loop and step retries handle failures; fail fast here.
+      max-attempts: 1
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      embedding:
+        options:
+          model: ${FABRIC_EMBEDDING_MODEL:qwen3-embedding:0.6b}
+
+fabric:
+  nats:
+    url: ${NATS_URL:nats://localhost:4222}
+    # Replies to the kernel arrive under its own prefix, which agents and people may not subscribe to.
+    inbox-prefix: _INBOX_kernel
+  agent:
+    provider: kernel
+    # The kernel serves no capabilities of its own (its memory is the query.memory subject), so it runs no agent
+    # runtime: nothing to register, no heartbeats.
+    enabled: false
+  kernel:
+    use-llm-planner: ${FABRIC_LLM_PLANNER:true}
+    embeddings: ${FABRIC_EMBEDDINGS:true}
+
+logging:
+  level:
+    root: warn
+    dev.capabilityfabric: info
