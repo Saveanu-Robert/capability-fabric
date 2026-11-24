@@ -2,6 +2,11 @@
 
 **An AI-native microservice architecture you can talk to, built around a personal to-do system.**
 
+[![CI](https://github.com/Saveanu-Robert/capability-fabric/actions/workflows/ci.yml/badge.svg)](https://github.com/Saveanu-Robert/capability-fabric/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+![Java 25](https://img.shields.io/badge/Java-25-orange.svg)
+![Platforms: Linux and macOS](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS-lightgrey.svg)
+
 Every service is a capability provider that announces, in a shared vocabulary, what it reads and what it writes. A deterministic kernel composes the providers that are live right now into a plan for each goal, from their descriptions, without being coded against any of them. Language models propose; the kernel checks every proposal before it becomes a fact. A provider that joins while the system runs changes what existing providers produce, with no change to them and no restart.
 
 You talk to it in plain language, with no commands to learn: "plan my move to Berlin by March", "I finished the domain thing, it took 2 hours", "what should I do today?". Another service talks to it the same way, or with typed actions, and always gets a final outcome back: done, or rejected with a reason code.
@@ -23,6 +28,8 @@ You talk to it in plain language, with no commands to learn: "plan my move to Be
 ### 🎬 See every feature in one command
 
 ```bash
+git clone https://github.com/Saveanu-Robert/capability-fabric.git
+cd capability-fabric
 ./demo.sh            # Linux or macOS
 ```
 
@@ -40,6 +47,7 @@ It builds and starts a fresh, isolated system, pairs a device, admits the agents
 | [🧭 Try every flow](#-try-every-flow) | | [🧪 Build and test](#-build-and-test) |
 | | | [🗂️ Project layout](#%EF%B8%8F-project-layout) |
 | | | [⚠️ Known limitations](#%EF%B8%8F-known-limitations) |
+| | | [📄 License](#-license) |
 
 ## 💡 The idea
 
@@ -160,6 +168,8 @@ Every step names the outcome it expects (`COMPLETED`, `ANSWERED`, `ASKED` or `RE
 `fabric --demo` also runs on its own against any system this device is paired with. It creates its own goals and cancels them at the end, but on a system that already has goals some answers differ from the expected ones, so the scripts' fresh system is the way to judge it.
 
 ## 🚀 Quick start
+
+Every command below runs in the cloned project folder (`git clone https://github.com/Saveanu-Robert/capability-fabric.git`, then `cd capability-fabric`).
 
 1. **Pull the models** once:
 
@@ -831,3 +841,7 @@ The Java packages are `dev.capabilityfabric.*` and the CLI is called `fabric`.
 - **Shared agent role.** All agents log in to the broker as one role. Calls and replies are sealed for their recipient, but an agent can see that traffic exists and can read the signals, which carry ids only.
 - **Rate limits** for unknown keys are shared: a flood of requests from new keys can delay a new agent's first heartbeat. The gateway counts connections per address from the TLS handshake on and closes connections that send nothing after about 10 seconds; limits at connection time need a firewall or a proxy in front.
 - **One kernel** owns the ledger. A run interrupted by a kernel restart starts again from the beginning of its plan; unchanged values produce no new facts, so nothing is duplicated.
+
+## 📄 License
+
+Capability Fabric is released under the [Apache License 2.0](LICENSE). The models it runs are downloaded separately by Ollama and keep their own licenses: the Qwen models it uses by default are also published under Apache 2.0.
